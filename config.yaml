@@ -1,0 +1,27 @@
+# 业务端口
+listen_addr: "unix:///var/run/ip-resolver.sock"
+# 状态监控端口
+monitor_addr: "0.0.0.0:9090"
+# 缓存预刷新比例：10 代表剩下的 10% 时间（例如30天里的最后3天）
+cache_refresh_ratio: 10
+
+# 日志等级: debug / info
+log_level: "info"
+# 日志文件路径 (留空即只输出到控制台)
+log_file: "./resolver.log"
+
+# 缓存时间(秒): 默认30天 (30 * 24 * 3600 = 2592000)
+cache_ttl_seconds: 2592000
+
+# 云市场供应商密钥
+provider:
+  # 具体见 factory.go
+  name: "38599"
+  secret_id: ""
+  secret_key: ""
+
+# 腾讯云密钥
+quota:
+  secret_id: ""
+  secret_key: ""
+  instance_id: "market-"

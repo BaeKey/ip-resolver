@@ -1,0 +1,45 @@
+name: Release ip-resolver
+
+on:
+  workflow_dispatch: # 手动触发
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu 运行环境
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable' # 自动使用最新的 Go 稳定版
+          cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build
+        run: |
+          # 生成基于日期的版本号 (例如 v26.01.12)
+          echo "TAG_NAME=v$(date +'%y.%m.%d')" >> "$GITHUB_ENV"
+          
+          python release.py
+        env:
+          CGO_ENABLED: '0'
+          TZ: Asia/Shanghai # 修改为上海时间，方便版本号日期对应
+
+      - name: Publish
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ip-resolver ${{ env.TAG_NAME }}
+          tag_name: ${{ env.TAG_NAME }}
+          # 关键：这里匹配 build.py 生成的 zip 文件
+          files: './release/ip-resolver*.zip'
+          prerelease: false # 设置为正式发布 (如果想要 Pre-release 标改为 true)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
