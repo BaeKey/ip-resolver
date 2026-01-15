@@ -211,3 +211,10 @@ func (m *Manager) worker(id int) {
 		}()
 	}
 }
+
+func (m *Manager) GetCacheCount() int64 {
+    if m.cache == nil {
+        return 0
+    }
+    return m.cache.Count()
+}

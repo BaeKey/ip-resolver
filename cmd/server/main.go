@@ -79,6 +79,8 @@ func main() {
 	}
 
 	mgr := worker.NewManager(prov, cfg)
+	
+	mon.SetCacheFetcher(mgr.GetCacheCount)
 
 	// 3. 信号处理
 	rootCtx, stop := signal.NotifyContext(
