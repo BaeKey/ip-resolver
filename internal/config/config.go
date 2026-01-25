@@ -16,6 +16,7 @@ type Config struct {
 	// Cache
 	CacheTTLSeconds   int64 `mapstructure:"cache_ttl_seconds"`
 	CacheRefreshRatio int   `mapstructure:"cache_refresh_ratio"`
+	CacheStorePath    string `mapstructure:"cache_store_path"`
 
 	// Provider 配置
 	Provider ProviderConfig `mapstructure:"provider"`
@@ -53,6 +54,7 @@ func SetDefaults() {
 	// Cache
 	viper.SetDefault("cache_ttl_seconds", int64(30*24*60*60)) // 30 天
 	viper.SetDefault("cache_refresh_ratio", 10)
+	viper.SetDefault("cache_store_path", "./.cache.db")
 }
 
 // LoadConfig 加载配置文件并反序列化

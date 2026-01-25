@@ -115,6 +115,8 @@ func main() {
 	// 6. 监控 Server (仅 TCP)
 	monMux := http.NewServeMux()
 	monMux.HandleFunc("/status", mon.HandleStatus)
+	monMux.HandleFunc("/statistics", mgr.HandleStatistics)
+
 
 	monSrv := &http.Server{
 		Addr:              cfg.MonitorAddr,

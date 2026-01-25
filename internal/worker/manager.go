@@ -2,15 +2,18 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"ip-resolver/internal/cache"
 	"ip-resolver/internal/config"
 	"ip-resolver/internal/provider"
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
 )
 
 /*
@@ -70,10 +73,21 @@ func NewManager(p provider.IPProvider, cfg *config.Config) *Manager {
 	ratio := float64(cfg.CacheRefreshRatio) / 100.0
 	ttl := time.Duration(cfg.CacheTTLSeconds) * time.Second
 
+	c := cache.New(ttl, ratio)
+
+	// 如果配置了持久化路径，尝试加载并开启自动保存
+	if cfg.CacheStorePath != "" {
+		if err := c.LoadFromSQLite(cfg.CacheStorePath); err != nil {
+			log.Printf("尝试从 SQLite 加载缓存失败 (可能是首次启动): %v", err)
+		}
+		// 开启 Write-Behind 持久化 (批处理参数已内置)
+		c.StartPersistence(cfg.CacheStorePath)
+	}
+
 	return &Manager{
 		provider:  p,
 		queue:     make(chan string, QueueSize),
-		cache:     cache.New(ttl, ratio),
+		cache:     c,
 		inflight:  newInflightSet(),
 		debugMode: cfg.LogLevel == "debug",
 		cacheTTL:  ttl,
@@ -213,8 +227,81 @@ func (m *Manager) worker(id int) {
 }
 
 func (m *Manager) GetCacheCount() int64 {
-    if m.cache == nil {
-        return 0
+	if m.cache == nil {
+		return 0
+	}
+	return m.cache.Count()
+}
+
+func (m *Manager) HandleStatistics(w http.ResponseWriter, r *http.Request) {
+    // 1. 获取数据并处理可能的错误
+    items, err := m.cache.GetAllItems()
+    if err != nil {
+        log.Printf("获取统计数据失败: %v", err)
+        http.Error(w, "Failed to retrieve statistics from database", http.StatusInternalServerError)
+        return
     }
-    return m.cache.Count()
+
+    // map[tag][]string
+    stats := make(map[string][]string)
+    for k, v := range items {
+        stats[v] = append(stats[v], k)
+    }
+
+    // Sort tags
+    var tags []string
+    for t := range stats {
+        tags = append(tags, t)
+    }
+    sort.Strings(tags)
+
+    // 2. 获取丢弃计数 (用于监控磁盘写入压力)
+    droppedCount := m.cache.DroppedCount()
+
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    
+    // 在 HTML 中增加了 Dropped Updates 的展示
+    fmt.Fprintf(w, `<html>
+<head>
+    <title>IP Cache Statistics</title>
+    <style>
+        body { font-family: sans-serif; }
+        table { border-collapse: collapse; width: 100%%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .metric { margin-bottom: 20px; font-weight: bold; }
+        .warn { color: red; }
+    </style>
+</head>
+<body>
+    <h1>IP Cache Statistics</h1>
+    <div class="metric">
+        <p>Total Cached Items: %d</p>
+        <p>Dropped Updates (Disk Pressure): <span class="%s">%d</span></p>
+    </div>
+    <table>
+        <tr>
+            <th>Tag</th>
+            <th>IP Ranges (Count)</th>
+        </tr>`, 
+        len(items), 
+        func() string { if droppedCount > 0 { return "warn" } else { return "" } }(), //如果有丢弃显示红色
+        droppedCount,
+    )
+
+    for _, tag := range tags {
+        keys := stats[tag]
+        sort.Strings(keys)
+        
+        // 为了展示没那么长，只展示前 50 个 + 计数
+        displayKeys := keys
+        if len(keys) > 50 {
+            displayKeys = keys[:50]
+            displayKeys = append(displayKeys, fmt.Sprintf("... and %d others", len(keys)-50))
+        }
+        
+        fmt.Fprintf(w, "<tr><td>%s</td><td>%s <br/>(Count: %d)</td></tr>", 
+            tag, strings.Join(displayKeys, ", "), len(keys))
+    }
+    fmt.Fprintf(w, "</table></body></html>")
 }

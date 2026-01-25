@@ -12,6 +12,8 @@ log_file: "./resolver.log"
 
 # 缓存时间(秒): 默认30天 (30 * 24 * 3600 = 2592000)
 cache_ttl_seconds: 2592000
+# 缓存持久化路径 (SQLite)
+cache_store_path: "./.cache.db"
 
 # 云市场供应商密钥
 provider:
