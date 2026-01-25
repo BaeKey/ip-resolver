@@ -35,11 +35,15 @@ func New() *Monitor {
 }
 
 func (m *Monitor) SetCacheFetcher(f func() int64) {
+    m.mu.Lock()
     m.cacheFetcher = f
+    m.mu.Unlock()
 }
 
 func (m *Monitor) SetQuotaFetcher(f func() int64) {
+    m.mu.Lock()
     m.quotaFetcher = f
+    m.mu.Unlock()
 }
 
 // RecordSuccess 记录一次成功
@@ -66,9 +70,15 @@ func (m *Monitor) RecordFailure(ip string, errMsg string) {
 
 // HandleStatus HTTP 接口处理函数
 func (m *Monitor) HandleStatus(w http.ResponseWriter, r *http.Request) {
-    // 1. 更新配额 (Quota)
-    if m.quotaFetcher != nil {
-        newQuota := m.quotaFetcher()
+    // 1. 安全读取并调用 fetchers
+    m.mu.RLock()
+    quotaFetcher := m.quotaFetcher
+    cacheFetcher := m.cacheFetcher
+    m.mu.RUnlock()
+
+    // 更新配额 (Quota)
+    if quotaFetcher != nil {
+        newQuota := quotaFetcher()
         if newQuota >= 0 {
             m.mu.Lock()
             m.RemainingRequestNum = newQuota
@@ -76,8 +86,8 @@ func (m *Monitor) HandleStatus(w http.ResponseWriter, r *http.Request) {
         }
     }
 
-    if m.cacheFetcher != nil {
-        count := m.cacheFetcher()
+    if cacheFetcher != nil {
+        count := cacheFetcher()
         m.mu.Lock()
         m.CacheItemCount = count
         m.mu.Unlock()

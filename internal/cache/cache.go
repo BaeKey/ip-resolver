@@ -1,6 +1,7 @@
 package cache
 
 import (
+    "context"
     "database/sql"
     "fmt"
     "log"
@@ -52,7 +53,7 @@ type Cache struct {
     refreshWindow int64
     shardCap      int
 
-    // 统计
+    // 统计指标
     count          int64
     droppedUpdates int64
 
@@ -61,11 +62,14 @@ type Cache struct {
     stop      chan struct{}
     persistCh chan persistenceOp
 
+    // === 数据库并发控制 ===
+    // 使用读写锁保护 dbPath 和 roDB，替代 sync.Once 以处理更复杂的初始化逻辑
+    dbMu   sync.RWMutex
     dbPath string
+    roDB   *sql.DB
 
-    // === 新增 ===
-    roDB *sql.DB
-    wg   sync.WaitGroup
+    wg     sync.WaitGroup
+    closed int32 // 0 = open, 1 = closed
 }
 
 // ================= 构造函数 =================
@@ -107,7 +111,7 @@ func (c *Cache) getShard(key string) *shard {
     return c.shards[h&shardMask]
 }
 
-// ================= 核心读写 =================
+// ================= 核心读写逻辑 =================
 
 func (c *Cache) Get(key string) (string, bool, bool, time.Duration) {
     now := atomic.LoadInt64(&c.now)
@@ -179,6 +183,11 @@ func (c *Cache) Delete(key string) {
 }
 
 func (c *Cache) sendToPersist(op persistenceOp) {
+    // 缓存已关闭则不再接收更新，防止 panic
+    if atomic.LoadInt32(&c.closed) == 1 {
+        atomic.AddInt64(&c.droppedUpdates, 1)
+        return
+    }
     select {
     case c.persistCh <- op:
     default:
@@ -186,14 +195,18 @@ func (c *Cache) sendToPersist(op persistenceOp) {
     }
 }
 
-// ================= 持久化 =================
+// ================= 持久化逻辑 =================
 
 func (c *Cache) StartPersistence(path string) {
+    // 设置路径
+    c.dbMu.Lock()
     c.dbPath = path
+    c.dbMu.Unlock()
 
-    if err := c.initReadOnlyDB(path); err != nil {
-        log.Printf("初始化只读 DB 失败: %v", err)
-        return
+    // 预热只读连接 (可选，但推荐)
+    if err := c.ensureReadOnlyDB(); err != nil {
+        log.Printf("StartPersistence: init roDB failed: %v", err)
+        // 注意：这里不 return，依然尝试启动写入协程，保证核心功能可用
     }
 
     c.wg.Add(1)
@@ -201,21 +214,24 @@ func (c *Cache) StartPersistence(path string) {
     go func() {
         defer c.wg.Done()
 
+        // 写入协程使用独立的连接
         db, err := sql.Open("sqlite", path)
         if err != nil {
-            log.Printf("持久化启动失败: %v", err)
+            log.Printf("StartPersistence: open db failed: %v", err)
             return
         }
         defer db.Close()
 
+        // 关键性能优化
         db.Exec("PRAGMA journal_mode=WAL;")
         db.Exec("PRAGMA synchronous=NORMAL;")
-
+        
+        // 单写原则
         db.SetMaxOpenConns(1)
         db.SetMaxIdleConns(1)
 
         if err := c.initDB(db); err != nil {
-            log.Printf("初始化数据库失败: %v", err)
+            log.Printf("StartPersistence: initDB failed: %v", err)
             return
         }
 
@@ -231,7 +247,7 @@ func (c *Cache) StartPersistence(path string) {
                 return
             }
             if err := c.flushBatch(db, batch); err != nil {
-                log.Printf("批量写入失败: %v", err)
+                log.Printf("Flush batch failed: %v", err)
             }
             batch = batch[:0]
         }
@@ -260,13 +276,46 @@ func (c *Cache) StartPersistence(path string) {
     }()
 }
 
-func (c *Cache) initReadOnlyDB(path string) error {
-    db, err := sql.Open("sqlite", path)
+// ensureReadOnlyDB 线程安全地初始化只读连接 (Double-Check Locking)
+func (c *Cache) ensureReadOnlyDB() error {
+    // [Fast Fail] 如果缓存已关闭，直接拒绝
+    if atomic.LoadInt32(&c.closed) == 1 {
+        return fmt.Errorf("cache is closed")
+    }
+    // 1. 快速检查 (读锁)
+    c.dbMu.RLock()
+    if c.roDB != nil {
+        c.dbMu.RUnlock()
+        return nil
+    }
+    path := c.dbPath
+    c.dbMu.RUnlock()
+
+    if path == "" {
+        return fmt.Errorf("db path not set")
+    }
+
+    // 2. 慢速初始化 (写锁)
+    c.dbMu.Lock()
+    defer c.dbMu.Unlock()
+
+    // 二次检查
+    if c.roDB != nil {
+        return nil
+    }
+
+    db, err := sql.Open("sqlite", path+"?mode=ro")
     if err != nil {
         return err
     }
+
+    // 只读连接配置
+    _, _ = db.Exec("PRAGMA journal_mode=WAL;")
+    _, _ = db.Exec("PRAGMA busy_timeout=5000;") // 减少锁竞争报错
+    
     db.SetMaxOpenConns(1)
     db.SetMaxIdleConns(1)
+
     c.roDB = db
     return nil
 }
@@ -290,12 +339,24 @@ func (c *Cache) flushBatch(db *sql.DB, batch []persistenceOp) error {
         return err
     }
 
-    stmtInsert, _ := tx.Prepare(
+    // 务必检查 Prepare 错误并回滚
+    stmtInsert, err := tx.Prepare(
         "INSERT OR REPLACE INTO ip_cache(key, value, exp, refresh_at) VALUES(?, ?, ?, ?)",
     )
-    stmtDelete, _ := tx.Prepare(
+    if err != nil {
+        _ = tx.Rollback()
+        return fmt.Errorf("prepare insert failed: %w", err)
+    }
+    defer stmtInsert.Close()
+
+    stmtDelete, err := tx.Prepare(
         "DELETE FROM ip_cache WHERE key = ?",
     )
+    if err != nil {
+        _ = tx.Rollback()
+        return fmt.Errorf("prepare delete failed: %w", err)
+    }
+    defer stmtDelete.Close()
 
     for _, op := range batch {
         if op.IsDelete {
@@ -305,16 +366,19 @@ func (c *Cache) flushBatch(db *sql.DB, batch []persistenceOp) error {
         }
     }
 
-    stmtInsert.Close()
-    stmtDelete.Close()
-
-    return tx.Commit()
+    if err := tx.Commit(); err != nil {
+        return fmt.Errorf("commit failed: %w", err)
+    }
+    return nil
 }
 
 // ================= 启动加载 =================
 
 func (c *Cache) LoadFromSQLite(path string) error {
+    // 设置路径
+    c.dbMu.Lock()
     c.dbPath = path
+    c.dbMu.Unlock()
 
     db, err := sql.Open("sqlite", path)
     if err != nil {
@@ -322,6 +386,7 @@ func (c *Cache) LoadFromSQLite(path string) error {
     }
     defer db.Close()
 
+    // 确保表结构存在
     if err := c.initDB(db); err != nil {
         return err
     }
@@ -346,16 +411,28 @@ func (c *Cache) LoadFromSQLite(path string) error {
     return nil
 }
 
-// ================= 只读查询 =================
+// ================= 只读查询 (统计) =================
 
 func (c *Cache) GetAllItems() (map[string]string, error) {
-    if c.roDB == nil {
-        return nil, fmt.Errorf("persistence not enabled")
+    return c.GetAllItemsContext(context.Background())
+}
+
+func (c *Cache) GetAllItemsContext(ctx context.Context) (map[string]string, error) {
+    // 线程安全地获取连接
+    if err := c.ensureReadOnlyDB(); err != nil {
+        return nil, err
+    }
+
+    c.dbMu.RLock()
+    db := c.roDB
+    c.dbMu.RUnlock()
+
+    if db == nil {
+        return nil, fmt.Errorf("db not initialized")
     }
 
     now := atomic.LoadInt64(&c.now)
-
-    rows, err := c.roDB.Query(
+    rows, err := db.QueryContext(ctx,
         "SELECT key, value FROM ip_cache WHERE exp > ?",
         now,
     )
@@ -374,7 +451,7 @@ func (c *Cache) GetAllItems() (map[string]string, error) {
     return res, nil
 }
 
-// ================= 直接写入（恢复用） =================
+// ================= 恢复用辅助方法 =================
 
 func (c *Cache) SetWithTime(key, val string, exp, refreshAt int64) {
     s := c.getShard(key)
@@ -398,18 +475,20 @@ func (c *Cache) SetWithTime(key, val string, exp, refreshAt int64) {
     atomic.AddInt64(&c.count, 1)
 }
 
-// ================= 生命周期 =================
+// ================= 生命周期与后台任务 =================
 
 func (c *Cache) Close() {
+    atomic.StoreInt32(&c.closed, 1)
     close(c.stop)
     c.wg.Wait()
 
+    c.dbMu.Lock()
     if c.roDB != nil {
         _ = c.roDB.Close()
+        c.roDB = nil
     }
+    c.dbMu.Unlock()
 }
-
-// ================= 后台任务 =================
 
 func (c *Cache) startClock() {
     ticker := time.NewTicker(time.Second)
@@ -465,15 +544,12 @@ func (c *Cache) cleanupShard(s *shard, now int64) {
     }
 }
 
-// ================= 统计方法 =================
+// ================= 统计 Getter =================
 
-// Count 返回当前内存中缓存的条目总数
-// 使用原子操作保证并发安全，且性能极高
 func (c *Cache) Count() int64 {
     return atomic.LoadInt64(&c.count)
 }
 
-// DroppedCount 返回因持久化队列满而丢失的更新数量
 func (c *Cache) DroppedCount() int64 {
     return atomic.LoadInt64(&c.droppedUpdates)
 }

@@ -31,11 +31,13 @@ func main() {
 	}
 
 	// 1.1 日志配置
+	var logFile *os.File
 	if cfg.LogFile != "" {
 		f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Printf("无法打开日志文件 %s: %v, 将仅输出到控制台", cfg.LogFile, err)
 		} else {
+			logFile = f
 			// 同时输出到控制台和文件
 			mw := io.MultiWriter(os.Stdout, f)
 			log.SetOutput(mw)
@@ -180,7 +182,12 @@ func main() {
 	wg.Wait()
 
 	// 确认无流量后关闭 Manager
-	mgr.Stop() 
+	mgr.Stop()
+	
+	// 关闭日志文件
+	if logFile != nil {
+		_ = logFile.Close()
+	}
 	log.Println("退出完成")
 }
 

@@ -144,12 +144,12 @@ func (m *Manager) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	parsedIP := net.ParseIP(rawIP)
 	if parsedIP == nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("invalid ip format"))
+		_, _ = w.Write([]byte("invalid ip format"))
 		return
 	}
 	if parsedIP.To4() == nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("only ipv4 supported"))
+		_, _ = w.Write([]byte("only ipv4 supported"))
 		return
 	}
 

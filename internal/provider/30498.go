@@ -13,7 +13,7 @@ type TencentIPQueryProvider struct {
 	mon  *monitor.Monitor
 }
 
-func New_30498_Provider (secretID, secretKey string, mon *monitor.Monitor) *TencentIPQueryProvider {
+func New30498Provider(secretID, secretKey string, mon *monitor.Monitor) *TencentIPQueryProvider {
 	config := &TencentCloudConfig{
 		SecretID:  secretID,
 		SecretKey: secretKey,

@@ -13,7 +13,7 @@ type ShuMaiProvider struct {
 	mon  *monitor.Monitor
 }
 
-func New_38599_Provider(secretID, secretKey string, mon *monitor.Monitor) *ShuMaiProvider {
+func New38599Provider(secretID, secretKey string, mon *monitor.Monitor) *ShuMaiProvider {
 	config := &TencentCloudConfig{
 		SecretID:  secretID,
 		SecretKey: secretKey,
