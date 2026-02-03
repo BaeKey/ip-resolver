@@ -22,7 +22,7 @@ provider:
   secret_id: ""
   secret_key: ""
 
-# 腾讯云密钥
+# 腾讯云账号密钥
 quota:
   secret_id: ""
   secret_key: ""
